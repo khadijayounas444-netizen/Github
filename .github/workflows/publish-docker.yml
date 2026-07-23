@@ -45,7 +45,7 @@ jobs:
 
       # Pin Python so `tomllib` (3.11+) in the next step never depends on the
       # runner's default python3 — mirrors publish.yml.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
