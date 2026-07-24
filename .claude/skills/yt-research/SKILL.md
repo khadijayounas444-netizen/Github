@@ -46,6 +46,27 @@ python scripts/yt_search.py "lofi beats" -n 5 --format urls
 | `-n`, `--limit` | integer ≥ 1 | `25` | How many videos to return |
 | `--sort` | `relevance`, `date`, `views`, `rating` | `relevance` | Result ordering. `date` = newest first (best proxy for "latest") |
 | `--format` | `json`, `table`, `urls` | `json` | Output shape |
+| `--region` | 2-letter code, e.g. `US` | none | Localize results to a market (spoofs geolocation). Use for audience targeting. |
+| `--lang` | e.g. `en` | none | Interface language; pair with `--region`. |
+| `--latin-only` | flag | off | Drop results whose titles are mostly non-Latin script (bonus English filter). |
+
+### Targeting an audience/market
+
+YouTube localizes search to the runner's IP by default, so a search from one
+country returns that country's channels. To research a **different market** —
+e.g. a creator in one region studying North-American content to monetize in USD —
+combine the flags:
+
+```bash
+# North-American English horror content, newest first
+python scripts/yt_search.py "horror stories" -n 25 --sort date \
+  --region US --lang en --latin-only
+```
+
+`--region` is the primary lever (it changes what YouTube returns); `--latin-only`
+is a secondary filter that only removes titles written mostly in another script,
+so it won't catch a foreign channel that titles its videos in English. If results
+still look off-market, a VPN/proxy in the target country is the strongest fix.
 
 ### JSON output shape
 

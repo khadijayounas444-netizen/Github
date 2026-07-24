@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import unicodedata
 from urllib.parse import quote_plus
 
 try:
@@ -53,6 +54,24 @@ SORT_FILTERS = {
 }
 
 
+def _is_latin_title(title: object, threshold: float = 0.5) -> bool:
+    """True if a title's letters are predominantly Latin script.
+
+    Used by ``--latin-only`` to drop results whose titles are mostly written
+    in another script (e.g. Devanagari/Arabic) — a cheap, IP-independent way
+    to bias a search toward English / North-American channels even when the
+    machine running the search sits in another region. Titles with no letters
+    at all (numbers, emoji, symbols) are kept.
+    """
+    if not isinstance(title, str) or not title:
+        return False
+    letters = [c for c in title if c.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for c in letters if "LATIN" in unicodedata.name(c, ""))
+    return latin / len(letters) >= threshold
+
+
 def _seconds_to_hms(seconds: object) -> str | None:
     """Render a duration in seconds as H:MM:SS / M:SS."""
     if not isinstance(seconds, (int, float)) or seconds < 0:
@@ -74,47 +93,76 @@ def _build_search_target(query: str, sort: str, limit: int) -> str:
     return f"https://www.youtube.com/results?search_query={quote_plus(query)}&sp={sp}"
 
 
-def search(query: str, limit: int, sort: str) -> list[dict]:
-    """Run the search and return a list of normalized video dicts."""
-    target = _build_search_target(query, sort, limit)
-    ydl_opts = {
+def _normalize_entry(entry: dict, rank: int) -> dict:
+    """Turn a raw yt-dlp flat entry into our stable output shape."""
+    video_id = entry.get("id")
+    url = entry.get("url") or (
+        f"https://www.youtube.com/watch?v={video_id}" if video_id else None
+    )
+    # Normalize to a canonical watch URL when we only got an id/shortlink.
+    if video_id and (not url or "watch?v=" not in url):
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    duration = entry.get("duration")
+    return {
+        "rank": rank,
+        "title": entry.get("title"),
+        "url": url,
+        "video_id": video_id,
+        "author": entry.get("uploader") or entry.get("channel"),
+        "channel_url": entry.get("channel_url") or entry.get("uploader_url"),
+        "duration_seconds": duration,
+        "duration": _seconds_to_hms(duration),
+        "view_count": entry.get("view_count"),
+    }
+
+
+def search(
+    query: str,
+    limit: int,
+    sort: str,
+    region: str | None = None,
+    lang: str | None = None,
+    latin_only: bool = False,
+) -> list[dict]:
+    """Run the search and return a list of normalized video dicts.
+
+    ``region`` (e.g. ``US``) spoofs the geolocation via ``geo_bypass_country``
+    so YouTube returns results for that market; ``lang`` (e.g. ``en``) sets the
+    interface language. ``latin_only`` drops non-Latin-script titles. When
+    filtering is on, extra results are fetched so the final list still reaches
+    ``limit`` where possible.
+    """
+    # Over-fetch when we will filter, so filtering still yields ~limit rows.
+    fetch_n = min(limit * 4, 200) if latin_only else limit
+    target = _build_search_target(query, sort, fetch_n)
+    ydl_opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": "in_playlist",  # list entries only; do not resolve each video
         "skip_download": True,
-        "playlistend": limit,           # cap results when target is a results URL
+        "playlistend": fetch_n,         # cap results when target is a results URL
         "default_search": "ytsearch",
     }
+    if region:
+        # Spoof the X-Forwarded-For country so search results are localized to
+        # the target market regardless of where this machine actually is.
+        ydl_opts["geo_bypass_country"] = region.upper()
+    if lang:
+        ydl_opts["extractor_args"] = {"youtube": {"lang": [lang]}}
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(target, download=False)
 
     entries = (info or {}).get("entries") or []
     videos: list[dict] = []
-    for rank, entry in enumerate(entries[:limit], start=1):
+    for entry in entries:
         if not entry:
             continue
-        video_id = entry.get("id")
-        url = entry.get("url") or (
-            f"https://www.youtube.com/watch?v={video_id}" if video_id else None
-        )
-        # Normalize to a canonical watch URL when we only got an id/shortlink.
-        if video_id and (not url or "watch?v=" not in url):
-            url = f"https://www.youtube.com/watch?v={video_id}"
-        duration = entry.get("duration")
-        videos.append(
-            {
-                "rank": rank,
-                "title": entry.get("title"),
-                "url": url,
-                "video_id": video_id,
-                "author": entry.get("uploader") or entry.get("channel"),
-                "channel_url": entry.get("channel_url") or entry.get("uploader_url"),
-                "duration_seconds": duration,
-                "duration": _seconds_to_hms(duration),
-                "view_count": entry.get("view_count"),
-            }
-        )
+        if latin_only and not _is_latin_title(entry.get("title")):
+            continue
+        videos.append(_normalize_entry(entry, len(videos) + 1))
+        if len(videos) >= limit:
+            break
     return videos
 
 
@@ -153,13 +201,30 @@ def main(argv: list[str] | None = None) -> int:
         "--format", choices=["json", "table", "urls"], default="json",
         help="Output format (default: json)",
     )
+    parser.add_argument(
+        "--region", default=None, metavar="CC",
+        help="Two-letter country code to localize results to (e.g. US). "
+             "Targets that market regardless of where this machine is.",
+    )
+    parser.add_argument(
+        "--lang", default=None, metavar="LL",
+        help="Interface language code (e.g. en). Pairs well with --region.",
+    )
+    parser.add_argument(
+        "--latin-only", action="store_true",
+        help="Drop results whose titles are mostly non-Latin script "
+             "(e.g. Hindi/Arabic) — biases toward English-language channels.",
+    )
     args = parser.parse_args(argv)
 
     if args.limit < 1:
         parser.error("--limit must be >= 1")
 
     try:
-        videos = search(args.query, args.limit, args.sort)
+        videos = search(
+            args.query, args.limit, args.sort,
+            region=args.region, lang=args.lang, latin_only=args.latin_only,
+        )
     except Exception as exc:  # noqa: BLE001 - surface any yt-dlp/network error cleanly
         sys.stderr.write(f"Search failed: {exc}\n")
         return 1
