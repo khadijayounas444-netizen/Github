@@ -27,9 +27,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+
+def _resolve_notebooklm_cmd() -> list[str]:
+    """Find the ``notebooklm`` CLI, preferring the venv running this script.
+
+    On Windows (and inside virtualenvs generally) the ``notebooklm`` console
+    script lives in the interpreter's Scripts/bin directory, which is often
+    NOT on the system PATH — so a bare ``notebooklm`` lookup fails. Resolve it
+    relative to ``sys.executable`` first, then PATH, then fall back to running
+    the package as a module with this same interpreter (guaranteed to exist).
+    """
+    override = os.environ.get("NOTEBOOKLM_CMD")
+    if override:
+        return [override]
+    exe_dir = Path(sys.executable).parent
+    for name in ("notebooklm.exe", "notebooklm"):
+        candidate = exe_dir / name
+        if candidate.exists():
+            return [str(candidate)]
+    on_path = shutil.which("notebooklm")
+    if on_path:
+        return [on_path]
+    # Last resort: `python -m notebooklm` (the package ships a __main__.py).
+    return [sys.executable, "-m", "notebooklm"]
+
+
+_NOTEBOOKLM_CMD = _resolve_notebooklm_cmd()
 
 
 def _extract_urls_from_text(text: str) -> list[str]:
@@ -59,7 +89,7 @@ def _extract_urls_from_text(text: str) -> list[str]:
 
 def _add_source(url: str, notebook: str | None, timeout: float | None) -> tuple[bool, str]:
     """Run the CLI to add one youtube source. Returns (ok, detail)."""
-    cmd = ["notebooklm", "source", "add", url, "--type", "youtube", "--json"]
+    cmd = [*_NOTEBOOKLM_CMD, "source", "add", url, "--type", "youtube", "--json"]
     if notebook:
         cmd += ["--notebook", notebook]
     try:
@@ -67,7 +97,10 @@ def _add_source(url: str, notebook: str | None, timeout: float | None) -> tuple[
             cmd, capture_output=True, text=True, timeout=timeout
         )
     except FileNotFoundError:
-        return False, "notebooklm CLI not found on PATH"
+        return False, (
+            f"could not run notebooklm CLI ({' '.join(_NOTEBOOKLM_CMD)}); "
+            "set NOTEBOOKLM_CMD to its full path"
+        )
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout}s"
 
