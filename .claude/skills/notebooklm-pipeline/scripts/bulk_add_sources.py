@@ -94,7 +94,14 @@ def _add_source(url: str, notebook: str | None, timeout: float | None) -> tuple[
         cmd += ["--notebook", notebook]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
+            cmd,
+            capture_output=True,
+            text=True,
+            # The CLI emits UTF-8; without this, Windows decodes stdout as
+            # cp1252 and crashes on non-Latin characters in video titles.
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
     except FileNotFoundError:
         return False, (
@@ -107,9 +114,9 @@ def _add_source(url: str, notebook: str | None, timeout: float | None) -> tuple[
     if proc.returncode == 0:
         source_id = None
         try:
-            payload = json.loads(proc.stdout)
+            payload = json.loads(proc.stdout or "{}")
             source_id = (payload.get("source") or {}).get("id") or payload.get("id")
-        except (json.JSONDecodeError, AttributeError):
+        except (json.JSONDecodeError, AttributeError, TypeError):
             pass
         return True, source_id or "added"
 
